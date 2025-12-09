@@ -30,6 +30,12 @@ const envSchema = z.object({
    * In milliseconds
    */
   PAGE_TIMEOUT_MS: z.coerce.number().default(2 * 60 * 1000),
+
+  /**
+   * Chrome V8 heap size limit in MB (default: 512)
+   * Lower this if you're seeing OOM crashes
+   */
+  CHROME_HEAP_SIZE_MB: z.coerce.number().default(512),
 });
 
 export const env = envSchema.parse({
@@ -38,4 +44,5 @@ export const env = envSchema.parse({
   CHROME_DEBUG_PORT: process.env.CHROME_DEBUG_PORT,
   HEADLESS: process.env.HEADLESS,
   PAGE_TIMEOUT_MS: process.env.PAGE_TIMEOUT_MS,
+  CHROME_HEAP_SIZE_MB: process.env.CHROME_HEAP_SIZE_MB,
 });
