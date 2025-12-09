@@ -22,6 +22,10 @@ app.use("*", async (c, next) => {
 // Browser instance - launched once, kept alive
 let browser: Browser | null = null;
 let cdpSession: CDPSession | null = null;
+let browserHealthInterval: NodeJS.Timeout | null = null;
+
+// Track active WebSocket connections for keepalive pings
+const activeConnections = new Set<{ client: WebSocket; chrome: WebSocket }>();
 
 // Page timeout tracking - auto-close pages after PAGE_TIMEOUT_MS
 const pageTimeouts = new Map<Page, NodeJS.Timeout>();
@@ -60,6 +64,51 @@ function clearPageTimeout(page: Page) {
     clearTimeout(timeout);
     pageTimeouts.delete(page);
   }
+}
+
+// WebSocket keepalive - prevents Cloudflare/LB from killing "idle" connections
+const KEEPALIVE_INTERVAL_MS = 25_000; // 25s, well under typical 60s timeout
+
+function startKeepalive() {
+  setInterval(() => {
+    for (const conn of activeConnections) {
+      try {
+        // Ping both sides to keep the tunnel alive
+        if (conn.client.readyState === WebSocket.OPEN) {
+          conn.client.ping();
+        }
+        if (conn.chrome.readyState === WebSocket.OPEN) {
+          conn.chrome.ping();
+        }
+      } catch {
+        // Connection might be closing, ignore
+      }
+    }
+  }, KEEPALIVE_INTERVAL_MS);
+}
+
+// Browser health check - proactively restart if Chrome dies
+const HEALTH_CHECK_INTERVAL_MS = 10_000; // Check every 10s
+
+function startBrowserHealthCheck() {
+  if (browserHealthInterval) {
+    clearInterval(browserHealthInterval);
+  }
+
+  browserHealthInterval = setInterval(async () => {
+    if (browser && !browser.connected) {
+      logger.warn("Browser disconnected - attempting restart...");
+      browser = null;
+      cdpSession = null;
+
+      try {
+        await ensureBrowser();
+        logger.success("Browser restarted successfully");
+      } catch (err) {
+        logger.error("Failed to restart browser", err);
+      }
+    }
+  }, HEALTH_CHECK_INTERVAL_MS);
 }
 
 async function setupCDPLogging(b: Browser) {
