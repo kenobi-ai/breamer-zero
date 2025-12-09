@@ -240,6 +240,22 @@ async function ensureBrowser(): Promise<Browser> {
       "--disable-background-networking",
       // Allow connections from any origin (needed for tunnel)
       "--remote-debugging-address=0.0.0.0",
+
+      // Production stability flags
+      "--disable-dev-shm-usage", // Use /tmp instead of /dev/shm (prevents OOM in containers)
+      "--disable-gpu", // Reduce memory usage in headless
+      "--no-sandbox", // Required for some container environments (e.g., Docker)
+      "--disable-setuid-sandbox",
+      "--disable-software-rasterizer",
+
+      // Memory management
+      "--js-flags=--max-old-space-size=512", // Limit V8 heap
+      "--disable-features=TranslateUI",
+      "--disable-ipc-flooding-protection",
+
+      // Crash resilience
+      "--disable-breakpad", // Disable crash reporter
+      "--disable-component-update",
     ],
   });
 
@@ -294,9 +310,14 @@ app.get("/health", async (c) => {
       openPages: pages.length,
       trackedTimeouts: pageTimeouts.size,
     },
+    websocket: {
+      activeConnections: activeConnections.size,
+      keepaliveIntervalMs: KEEPALIVE_INTERVAL_MS,
+    },
     config: {
       pageTimeoutMs: env.PAGE_TIMEOUT_MS,
       pageTimeoutSec: env.PAGE_TIMEOUT_MS / 1000,
+      healthCheckIntervalMs: HEALTH_CHECK_INTERVAL_MS,
     },
     tunnel: {
       hostname: env.TUNNEL_HOSTNAME,
@@ -338,11 +359,28 @@ async function shutdown() {
   logger.blank();
   logger.warn("Shutting down...");
 
+  // Stop health check
+  if (browserHealthInterval) {
+    clearInterval(browserHealthInterval);
+    browserHealthInterval = null;
+  }
+
   // Clear all page timeouts
   for (const timeout of pageTimeouts.values()) {
     clearTimeout(timeout);
   }
   pageTimeouts.clear();
+
+  // Close all active WebSocket connections
+  for (const conn of activeConnections) {
+    try {
+      conn.client.close();
+      conn.chrome.close();
+    } catch {
+      // Ignore errors during shutdown
+    }
+  }
+  activeConnections.clear();
 
   if (browser) {
     logger.browser("closing");
@@ -422,9 +460,19 @@ printBanner();
 logger.divider();
 
 // Pre-launch browser so it's ready for first request
-ensureBrowser().catch((err) => {
-  logger.error("Failed to launch browser", err);
-});
+ensureBrowser()
+  .then(() => {
+    // Start keepalive pings after browser is ready
+    startKeepalive();
+    logger.info("WebSocket keepalive started (25s interval)");
+
+    // Start health monitoring
+    startBrowserHealthCheck();
+    logger.info("Browser health monitoring started (10s interval)");
+  })
+  .catch((err) => {
+    logger.error("Failed to launch browser", err);
+  });
 
 // Start HTTP server
 const server = serve({
@@ -450,8 +498,12 @@ server.on("upgrade", (request, socket, head) => {
       let clientClosed = false;
       let chromeClosed = false;
 
+      // Track this connection for keepalive pings
+      const connPair = { client: clientWs, chrome: chromeWs };
+
       chromeWs.on("open", () => {
         logger.ws("connected to Chrome", url);
+        activeConnections.add(connPair);
       });
 
       // Proxy messages: client → Chrome
@@ -468,10 +520,23 @@ server.on("upgrade", (request, socket, head) => {
         }
       });
 
+      // Handle pong responses (keepalive acknowledgement)
+      clientWs.on("pong", () => {
+        // Connection is alive
+      });
+      chromeWs.on("pong", () => {
+        // Connection is alive
+      });
+
+      const cleanup = () => {
+        activeConnections.delete(connPair);
+      };
+
       // Handle client close
       clientWs.on("close", (code, reason) => {
         clientClosed = true;
         logger.ws("client disconnected", `${code} ${reason || ""}`);
+        cleanup();
         if (!chromeClosed && chromeWs.readyState === WebSocket.OPEN) {
           chromeWs.close();
         }
@@ -481,6 +546,7 @@ server.on("upgrade", (request, socket, head) => {
       chromeWs.on("close", (code, reason) => {
         chromeClosed = true;
         logger.ws("chrome disconnected", `${code} ${reason || ""}`);
+        cleanup();
         if (!clientClosed && clientWs.readyState === WebSocket.OPEN) {
           clientWs.close();
         }
@@ -489,11 +555,13 @@ server.on("upgrade", (request, socket, head) => {
       // Handle errors
       clientWs.on("error", (err) => {
         logger.error("Client WebSocket error", err);
+        cleanup();
         if (!chromeClosed) chromeWs.close();
       });
 
       chromeWs.on("error", (err) => {
         logger.error("Chrome WebSocket error", err);
+        cleanup();
         if (!clientClosed) clientWs.close();
       });
     });
