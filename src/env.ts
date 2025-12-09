@@ -2,10 +2,15 @@ import { z } from "zod";
 
 const envSchema = z.object({
   /**
-   * Your Cloudflare Tunnel hostname (e.g., browser.yourdomain.com)
-   * This is what external clients will use to connect
+   * Cloudflare Tunnel hostname for HTTP API (e.g., breamer.yourdomain.com)
    */
   TUNNEL_HOSTNAME: z.string().min(1),
+
+  /**
+   * Cloudflare Tunnel hostname for Chrome WebSocket (e.g., browser.yourdomain.com)
+   * This routes directly to Chrome's debug port (9222)
+   */
+  BROWSER_HOSTNAME: z.string().min(1),
 
   /**
    * Port for the Hono HTTP server (default: 3000)
@@ -40,6 +45,7 @@ const envSchema = z.object({
 
 export const env = envSchema.parse({
   TUNNEL_HOSTNAME: process.env.TUNNEL_HOSTNAME,
+  BROWSER_HOSTNAME: process.env.BROWSER_HOSTNAME,
   PORT: process.env.PORT,
   CHROME_DEBUG_PORT: process.env.CHROME_DEBUG_PORT,
   HEADLESS: process.env.HEADLESS,

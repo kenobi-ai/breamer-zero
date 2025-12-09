@@ -82,15 +82,15 @@ app.get("/health", async (c) => {
   });
 });
 
-// CDP endpoint - Cloudflare routes /devtools/* directly to Chrome :9222
+// CDP endpoint - BROWSER_HOSTNAME routes directly to Chrome :9222
 app.get("/cdp", async (c) => {
   try {
     const b = await ensureBrowser();
     const localEndpoint = b.wsEndpoint();
-    // Replace local address with tunnel hostname (Cloudflare routes to Chrome directly)
+    // Replace local address with browser tunnel hostname
     const tunnelEndpoint = localEndpoint.replace(
-      `ws://127.0.0.1:${env.CHROME_DEBUG_PORT}/browser`,
-      `wss://${env.TUNNEL_HOSTNAME}/browser`
+      `ws://127.0.0.1:${env.CHROME_DEBUG_PORT}`,
+      `wss://${env.BROWSER_HOSTNAME}`
     );
 
     logger.ws("endpoint requested", tunnelEndpoint);
@@ -118,13 +118,14 @@ process.on("SIGTERM", shutdown);
 
 // Banner
 console.log(`
-  ╔═══════════════════════════════════════╗
-  ║        ⚡ BREAMER-ZERO ⚡              ║
-  ╠═══════════════════════════════════════╣
-  ║  HTTP     http://localhost:${env.PORT}        ║
-  ║  Chrome   localhost:${env.CHROME_DEBUG_PORT}             ║
-  ║  Tunnel   ${env.TUNNEL_HOSTNAME.slice(0, 25).padEnd(25)} ║
-  ╚═══════════════════════════════════════╝
+  ╔════════════════════════════════════════════╗
+  ║          ⚡ BREAMER-ZERO ⚡                 ║
+  ╠════════════════════════════════════════════╣
+  ║  HTTP      http://localhost:${String(env.PORT).padEnd(18)}║
+  ║  Chrome    localhost:${String(env.CHROME_DEBUG_PORT).padEnd(22)}║
+  ║  API       ${env.TUNNEL_HOSTNAME.slice(0, 30).padEnd(30)} ║
+  ║  Browser   ${env.BROWSER_HOSTNAME.slice(0, 30).padEnd(30)} ║
+  ╚════════════════════════════════════════════╝
 `);
 
 ensureBrowser().catch((err) => logger.error("Failed to launch browser", err));
