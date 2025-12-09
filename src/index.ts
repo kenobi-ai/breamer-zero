@@ -19,6 +19,16 @@ app.use("*", async (c, next) => {
 // Browser instance - launched once, kept alive
 let browser: Browser | null = null;
 
+// Metrics
+const metrics = {
+  startedAt: new Date(),
+  pagesCreated: 0,
+  pagesNavigated: 0,
+  pagesClosed: 0,
+  consoleErrors: 0,
+  pageErrors: 0,
+};
+
 async function ensureBrowser(): Promise<Browser> {
   if (browser && browser.connected) {
     return browser;
@@ -57,6 +67,62 @@ async function ensureBrowser(): Promise<Browser> {
     browser = null;
   });
 
+  // Log target lifecycle
+  browser.on("targetcreated", async (target) => {
+    const type = target.type();
+    const url = target.url();
+    logger.target("created", type, url || "(blank)");
+
+    if (type === "page") {
+      metrics.pagesCreated++;
+
+      try {
+        const page = await target.page();
+        if (!page) return;
+
+        // Log navigations
+        page.on("framenavigated", (frame) => {
+          if (frame === page.mainFrame()) {
+            metrics.pagesNavigated++;
+            logger.page("navigated", frame.url());
+          }
+        });
+
+        // Log page load
+        page.on("load", () => {
+          logger.page("loaded", page.url());
+        });
+
+        // Log console errors
+        page.on("console", (msg) => {
+          if (msg.type() === "error") {
+            metrics.consoleErrors++;
+            logger.cdp("console.error", msg.text().slice(0, 150));
+          }
+        });
+
+        // Log page errors
+        page.on("pageerror", (err) => {
+          metrics.pageErrors++;
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.cdp("pageerror", msg.slice(0, 150));
+        });
+
+        // Log page close
+        page.once("close", () => {
+          metrics.pagesClosed++;
+          logger.page("closed", page.url());
+        });
+      } catch {
+        // Page might close before we can attach
+      }
+    }
+  });
+
+  browser.on("targetdestroyed", (target) => {
+    logger.target("destroyed", target.type(), target.url() || "(blank)");
+  });
+
   logger.success("Browser ready");
   logger.browser("wsEndpoint", browser.wsEndpoint());
 
@@ -70,6 +136,7 @@ app.get("/", (c) => {
 app.get("/health", async (c) => {
   const isConnected = browser?.connected ?? false;
   const pages = browser ? await browser.pages() : [];
+  const uptimeMs = Date.now() - metrics.startedAt.getTime();
 
   return c.json({
     status: isConnected ? "healthy" : "degraded",
@@ -78,7 +145,19 @@ app.get("/health", async (c) => {
       debugPort: env.CHROME_DEBUG_PORT,
       openPages: pages.length,
     },
+    metrics: {
+      uptimeMs,
+      uptimeHuman: `${Math.floor(uptimeMs / 1000 / 60)}m ${Math.floor(
+        (uptimeMs / 1000) % 60
+      )}s`,
+      pagesCreated: metrics.pagesCreated,
+      pagesNavigated: metrics.pagesNavigated,
+      pagesClosed: metrics.pagesClosed,
+      consoleErrors: metrics.consoleErrors,
+      pageErrors: metrics.pageErrors,
+    },
     tunnel: env.TUNNEL_HOSTNAME,
+    browserHost: env.BROWSER_HOSTNAME,
   });
 });
 
