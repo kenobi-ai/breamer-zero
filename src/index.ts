@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { cors } from "hono/cors";
 import puppeteer, { Browser, CDPSession, Page } from "puppeteer";
+import { WebSocketServer, WebSocket } from "ws";
 import { env } from "./env";
 import { logger } from "./logger";
 
@@ -225,6 +226,8 @@ app.get("/", (c) => {
     endpoints: {
       cdp: "/cdp - Get WebSocket endpoint for browser connection",
       health: "/health - Health check with browser status",
+      devtools:
+        "/devtools/* - WebSocket proxy to Chrome (used by puppeteer.connect)",
     },
   });
 });
@@ -253,23 +256,21 @@ app.get("/health", async (c) => {
 });
 
 // CDP endpoint - returns the WebSocket endpoint rewritten for tunnel access
+// Now points to THIS server (which proxies to Chrome) instead of Chrome directly
 app.get("/cdp", async (c) => {
   try {
     const b = await ensureBrowser();
     const localEndpoint = b.wsEndpoint();
+    const path = new URL(localEndpoint).pathname;
 
-    // Rewrite localhost to tunnel hostname with WSS
-    const tunnelEndpoint = localEndpoint.replace(
-      `ws://127.0.0.1:${env.CHROME_DEBUG_PORT}`,
-      `wss://${env.TUNNEL_HOSTNAME}`
-    );
+    // Point to this server's WebSocket proxy (same host, same port)
+    const tunnelEndpoint = `wss://${env.TUNNEL_HOSTNAME}${path}`;
 
     logger.ws("endpoint requested", tunnelEndpoint);
 
     return c.json({
       wsEndpoint: tunnelEndpoint,
-      // Also include the path separately for flexible routing setups
-      path: new URL(localEndpoint).pathname,
+      path,
     });
   } catch (err) {
     logger.error("Failed to get CDP endpoint", err);
@@ -376,11 +377,84 @@ ensureBrowser().catch((err) => {
   logger.error("Failed to launch browser", err);
 });
 
-serve({
+// Start HTTP server
+const server = serve({
   fetch: app.fetch,
   port: env.PORT,
 });
 
+// WebSocket proxy server - forwards /devtools/* to Chrome's debug port
+const wss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (request, socket, head) => {
+  const url = request.url || "";
+
+  // Only proxy /devtools/* paths
+  if (url.startsWith("/devtools/")) {
+    logger.ws("upgrade", url);
+
+    wss.handleUpgrade(request, socket, head, (clientWs) => {
+      // Connect to Chrome's debug port
+      const chromeUrl = `ws://127.0.0.1:${env.CHROME_DEBUG_PORT}${url}`;
+      const chromeWs = new WebSocket(chromeUrl);
+
+      let clientClosed = false;
+      let chromeClosed = false;
+
+      chromeWs.on("open", () => {
+        logger.ws("connected to Chrome", url);
+      });
+
+      // Proxy messages: client → Chrome
+      clientWs.on("message", (data) => {
+        if (chromeWs.readyState === WebSocket.OPEN) {
+          chromeWs.send(data);
+        }
+      });
+
+      // Proxy messages: Chrome → client
+      chromeWs.on("message", (data) => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(data);
+        }
+      });
+
+      // Handle client close
+      clientWs.on("close", (code, reason) => {
+        clientClosed = true;
+        logger.ws("client disconnected", `${code} ${reason || ""}`);
+        if (!chromeClosed && chromeWs.readyState === WebSocket.OPEN) {
+          chromeWs.close();
+        }
+      });
+
+      // Handle Chrome close
+      chromeWs.on("close", (code, reason) => {
+        chromeClosed = true;
+        logger.ws("chrome disconnected", `${code} ${reason || ""}`);
+        if (!clientClosed && clientWs.readyState === WebSocket.OPEN) {
+          clientWs.close();
+        }
+      });
+
+      // Handle errors
+      clientWs.on("error", (err) => {
+        logger.error("Client WebSocket error", err);
+        if (!chromeClosed) chromeWs.close();
+      });
+
+      chromeWs.on("error", (err) => {
+        logger.error("Chrome WebSocket error", err);
+        if (!clientClosed) clientWs.close();
+      });
+    });
+  } else {
+    // Not a devtools path, reject the upgrade
+    socket.destroy();
+  }
+});
+
 logger.success(`Server listening on http://localhost:${env.PORT}`);
+logger.info(`WebSocket proxy active on ws://localhost:${env.PORT}/devtools/*`);
 logger.divider();
 logger.blank();
