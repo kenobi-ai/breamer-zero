@@ -3,11 +3,27 @@
   "version": "1.0.0",
   "description": "Always-on CDP server via WSS for remote browser automation",
   "type": "module",
+  "packageManager": "bun@1.3.11",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    ".env.example",
+    "assets",
+    "dist",
+    "README.md"
+  ],
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "build": "bun build src/index.ts --outdir=dist --target=node --format=esm --packages=external && tsc --emitDeclarationOnly",
+    "typecheck": "tsc --noEmit",
+    "prepack": "bun run build"
   },
   "keywords": [
     "cdp",
@@ -21,14 +37,13 @@
   "dependencies": {
     "@hono/node-server": "^1.13.0",
     "hono": "^4.10.8",
-    "puppeteer": "^24.32.1",
+    "puppeteer-core": "^24.32.1",
     "ws": "^8.18.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }
 }

@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { cors } from "hono/cors";
-import puppeteer, { Browser } from "puppeteer";
+import puppeteer, { type Browser } from "puppeteer-core";
 import { env } from "./env";
 import { logger } from "./logger";
 
@@ -29,37 +30,101 @@ const metrics = {
   pageErrors: 0,
 };
 
+function chromeExecutableCandidates(): string[] {
+  if (env.CHROME_EXECUTABLE_PATH) {
+    return [env.CHROME_EXECUTABLE_PATH];
+  }
+
+  if (process.platform === "darwin") {
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ];
+  }
+
+  if (process.platform === "win32") {
+    const roots = [
+      process.env.PROGRAMFILES,
+      process.env["PROGRAMFILES(X86)"],
+      process.env.LOCALAPPDATA,
+    ].filter((value): value is string => Boolean(value));
+
+    return roots.flatMap((root) => [
+      `${root}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${root}\\Chromium\\Application\\chrome.exe`,
+      `${root}\\Microsoft\\Edge\\Application\\msedge.exe`,
+    ]);
+  }
+
+  return [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/microsoft-edge",
+    "/snap/bin/chromium",
+  ];
+}
+
+function resolveChromeExecutablePath(): string {
+  const candidates = chromeExecutableCandidates();
+  const executablePath = candidates.find((candidate) => existsSync(candidate));
+
+  if (!executablePath) {
+    throw new Error(
+      `Chrome executable not found. Set CHROME_EXECUTABLE_PATH to an installed Chrome/Chromium binary. Checked: ${candidates.join(
+        ", "
+      )}`
+    );
+  }
+
+  return executablePath;
+}
+
 async function ensureBrowser(): Promise<Browser> {
   if (browser && browser.connected) {
     return browser;
   }
 
-  logger.browser("launching", `headless=${env.HEADLESS}`);
+  const executablePath = resolveChromeExecutablePath();
+
+  logger.browser(
+    "launching",
+    `headless=${env.HEADLESS} sandbox=${!env.CHROME_NO_SANDBOX}`
+  );
+  logger.browser("executable", executablePath);
+
+  const chromeArgs = [
+    `--remote-debugging-port=${env.CHROME_DEBUG_PORT}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-default-apps",
+    "--disable-popup-blocking",
+    "--disable-extensions",
+    "--disable-sync",
+    "--disable-background-networking",
+    "--remote-debugging-address=0.0.0.0",
+
+    // Production stability
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    `--js-flags=--max-old-space-size=${env.CHROME_HEAP_SIZE_MB}`,
+    "--disable-features=TranslateUI",
+    "--disable-breakpad",
+    "--disable-component-update",
+    ...(env.CHROME_NO_SANDBOX
+      ? ["--no-sandbox", "--disable-setuid-sandbox"]
+      : []),
+    ...env.CHROME_EXTRA_ARGS,
+  ];
 
   browser = await puppeteer.launch({
     headless: env.HEADLESS,
-    args: [
-      `--remote-debugging-port=${env.CHROME_DEBUG_PORT}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-default-apps",
-      "--disable-popup-blocking",
-      "--disable-extensions",
-      "--disable-sync",
-      "--disable-background-networking",
-      "--remote-debugging-address=0.0.0.0",
-
-      // Production stability
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-software-rasterizer",
-      `--js-flags=--max-old-space-size=${env.CHROME_HEAP_SIZE_MB}`,
-      "--disable-features=TranslateUI",
-      "--disable-breakpad",
-      "--disable-component-update",
-    ],
+    executablePath,
+    args: chromeArgs,
+    ...(env.CHROME_USER_DATA_DIR ? { userDataDir: env.CHROME_USER_DATA_DIR } : {}),
   });
 
   browser.on("disconnected", () => {
